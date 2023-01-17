@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+# I. Install Git, pip, venv and clone Intel OpenVINO Model Zoo (OMZ)
+apt update
+apt install git python3-pip python3-venv
+git clone https://github.com/openvinotoolkit/open_model_zoo.git
+
+# II. Create local virtual environment and activate it
+python3 -m venv venv
+. venv/bin/activate
+
+# III. Install auxiliary packages and APIs from OMZ
+pip install open_model_zoo/demos/object_detection_demo/python
+pip install open_model_zoo/tools/model_tools
+
+cp open_model_zoo/demos/common/python/openvino/model_zoo/model_api /usr/src/
+
+# IV. Install OpenVINO itself (development version)
+pip install openvino-dev
+
+# V. Download YOLOv4 model
+mkdir -p models/alexeyab
+cd models/alexeyab
+
+curl -JOLk https://github.com/AlexeyAB/darknet/releases/download/yolov4/yolov4-tiny.weights
+curl -JOLk https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/yolov4-tiny.cfg
+cd -
+
+# Get COCO class names (YOLOv4 is trained on COCO dataset)
+curl -JOLk https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names
+
+# VI. Download OpenVINO SSD models
+omz_downloader --name person-detection-0200 --output_dir models
