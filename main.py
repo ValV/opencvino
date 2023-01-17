@@ -19,8 +19,7 @@ import logging as log
 import sys
 
 from configparser import ConfigParser
-from os import path as osp
-from pathlib import Path
+from os import path as osp, access, R_OK
 from time import perf_counter
 
 import cv2 as cv
@@ -41,13 +40,13 @@ from model_api.performance_metrics import PerformanceMetrics
 from model_api.pipelines import get_user_config, AsyncPipeline
 from model_api.adapters import create_core, OpenvinoAdapter, OVMSAdapter
 
-import monitors
+# import monitors
 
 from images_capture import open_images_capture
 from helpers import resolution, log_latency_per_stage
 from visualizers import ColorPalette
 
-from cvdnn import WrapperDNN, backends, targets
+from cvdnn import inference_opencv, backends, targets
 
 log.basicConfig(format='[ %(levelname)s ] %(message)s', level=log.DEBUG, stream=sys.stdout)
 
@@ -390,11 +389,11 @@ def inference_openvino(args, cap):
     # OpenVINO results end
 
 
-def inference_opencv(args, cap):
-    pipeline = WrapperDNN(args, cap)
-    if not args.no_show:
-        pipeline.init_gui()
-    pipeline.inference()
+# def inference_opencv(args, cap):
+#     pipeline = WrapperDNN(args, cap)
+#     if not args.no_show:
+#         pipeline.init_gui()
+#     pipeline.inference()
 
 
 def main():
@@ -414,8 +413,9 @@ def main():
 
     # OpenVINO
     _, args.model = model_openvino
-    if args.output and isinstance(args.output, str):
-        split = list(osp.splitext(args.output))
+    output = args.output
+    if output and isinstance(output, str):
+        split = list(osp.splitext(output))
         split.insert(1, f'.{OPENVINO_MODEL}')
         args.output = ''.join(split)
         log.info(f"Saving to {args.output}...")
@@ -424,24 +424,27 @@ def main():
         args.output = None
     args.architecture_type = 'ssd'
     args.adapter = 'openvino'
-    # inference_openvino(args, cap)
+    inference_openvino(args, cap)
 
-    cap = cap.cap
-    # cap.cap.set(cv.CAP_PROP_POS_FRAMES, 0)
+    # cap = cap.cap
+    if hasattr(cap, 'cap'):
+        cap.cap.set(cv.CAP_PROP_POS_FRAMES, 0)
+    elif hasattr(cap, 'file_id'):
+        cap.file_id = 0
 
     # OpenCV
     args.model, args.config = model_opencv
-    if args.output and isinstance(args.output, str):
-        split = list(osp.splitext(args.output))
+    if output and isinstance(output, str):
+        split = list(osp.splitext(output))
         split.insert(1, f'.{OPENCV_MODEL}')
         args.output = ''.join(split)
         log.info(f"Saving to {args.output}...")
     else:
-        log.warning(f"Malformed output: {args.output}! Setting to 'None'")
+        log.warning(f"Malformed output: {args.output}! Will not write to file!")
         args.output = None
     config = ConfigParser(strict=False)
     config.read(args.config)
-    args.backend = 3
+    args.backend = cv.dnn.DNN_BACKEND_OPENCV
     args.framework = 'darknet'
     args.nms = 0.15
     args.alias = None
@@ -450,9 +453,23 @@ def main():
     args.width = int(config['net']['width'])
     args.height = int(config['net']['height'])
     args.rgb = True
-    # args.classes = None
-    args.coi = (1, )  # class 1 - person
-    inference_opencv(args, cap)
+    path_coco_names = osp.abspath('coco.names')
+    if osp.isfile(path_coco_names) and access(path_coco_names, R_OK):
+        print(f"Class names = {path_coco_names}")
+        args.classes = path_coco_names
+    else:
+        args.classes = None
+    args.coi = (1, 2, 3)  # class 1 - person, 2 - bike, 3 - car
+    # inference_opencv(args, cap)
+    inference_opencv(args, cap, PerformanceMetrics, ColorPalette)
+
+    try:
+        cap.cap.release()
+    except AttributeError:
+        try:
+            cap.release()
+        except:
+            pass
 
 
 if __name__ == '__main__':
