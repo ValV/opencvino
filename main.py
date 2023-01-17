@@ -18,6 +18,7 @@
 import logging as log
 import sys
 
+from configparser import ConfigParser
 from os import path as osp
 from pathlib import Path
 from time import perf_counter
@@ -57,14 +58,14 @@ def build_argparser():
     parser = ArgumentParser(add_help=False)
     args = parser.add_argument_group('Options')
     args.add_argument('-h', '--help', action='help', default=SUPPRESS, help='Show this help message and exit.')
-    args.add_argument('-m', '--model', required=True,
-                      help='Required. Path to an .xml file with a trained model '
-                           'or address of model inference service if using ovms adapter.')
-    available_model_wrappers = [name.lower() for name in DetectionModel.available_wrappers()]
-    args.add_argument('-at', '--architecture_type', help='Required. Specify model\' architecture type.',
-                      type=str, required=True, choices=available_model_wrappers)
-    args.add_argument('--adapter', help='Optional. Specify the model adapter. Default is openvino.',
-                      default='openvino', type=str, choices=('openvino', 'ovms'))
+    # args.add_argument('-m', '--model', required=True,
+    #                   help='Required. Path to an .xml file with a trained model '
+    #                        'or address of model inference service if using ovms adapter.')
+    # available_model_wrappers = [name.lower() for name in DetectionModel.available_wrappers()]
+    # args.add_argument('-at', '--architecture_type', help='Required. Specify model\' architecture type.',
+    #                   type=str, required=True, choices=available_model_wrappers)
+    # args.add_argument('--adapter', help='Optional. Specify the model adapter. Default is openvino.',
+    #                   default='openvino', type=str, choices=('openvino', 'ovms'))
     args.add_argument('-i', '--input', required=True,
                       help='Required. An input to process. The input must be a single image, '
                            'a folder of images, video file or camera id.')
@@ -78,7 +79,8 @@ def build_argparser():
     common_model_args.add_argument('-t', '--prob_threshold', default=0.5, type=float,
                                    help='Optional. Probability threshold for detections filtering.')
     common_model_args.add_argument('--resize_type', default=None, choices=RESIZE_TYPES.keys(),
-                                   help='Optional. A resize type for model preprocess. By default used model predefined type.')
+                                   help='Optional. A resize type for model preprocess. '
+                                        'By default used model predefined type.')
     common_model_args.add_argument('--input_size', default=(600, 600), type=int, nargs=2,
                                    help='Optional. The first image size used for CTPN model reshaping. '
                                         'Default: 600 600. Note that submitted images should have the same resolution, '
@@ -145,13 +147,14 @@ def build_argparser():
     opencv_args.add_argument('--framework', choices=['caffe', 'torch', 'darknet', 'dldt'],
                              help='Optional name of an origin framework of the model. '
                                   'Detect it automatically if it does not set.')
-    opencv_args.add_argument('--thr', type=float, default=0.5, help='Confidence threshold')
+    # opencv_args.add_argument('--thr', type=float, default=0.5, help='Confidence threshold')
     opencv_args.add_argument('--nms', type=float, default=0.4, help='Non-maximum suppression threshold')
     opencv_args.add_argument('--backend', choices=backends, default=cv.dnn.DNN_BACKEND_DEFAULT, type=int,
                              help="Choose one of computation backends: "
                                   "%d: automatically (by default), "
                                   "%d: Halide language (http://halide-lang.org/), "
-                                  "%d: Intel's Deep Learning Inference Engine (https://software.intel.com/openvino-toolkit), "
+                                  "%d: Intel's Deep Learning Inference Engine "
+                                  "(https://software.intel.com/openvino-toolkit), "
                                   "%d: OpenCV implementation, "
                                   "%d: VKCOM, "
                                   "%d: CUDA" % backends)
@@ -169,6 +172,8 @@ def build_argparser():
                              dest='asyncN',
                              help='Number of asynchronous forwards at the same time. '
                                   'Choose 0 for synchronous mode')
+    opencv_args.add_argument('--classes', required=False, default=None,
+                             help='Optional path to a text file with names of classes to label detected objects.')
 
     return parser
 
@@ -204,16 +209,31 @@ def print_raw_results(detections, labels, frame_id):
 
 def inference_openvino(args, cap):
     if args.architecture_type != 'yolov4' and args.anchors:
-        log.warning('The "--anchors" option works only for "-at==yolov4". Option will be omitted')
+        log.warning(
+            'The "--anchors" option works only for "-at==yolov4". '
+            'Option will be omitted'
+        )
     if args.architecture_type != 'yolov4' and args.masks:
-        log.warning('The "--masks" option works only for "-at==yolov4". Option will be omitted')
+        log.warning(
+            'The "--masks" option works only for "-at==yolov4". '
+            'Option will be omitted'
+        )
     if args.architecture_type not in ['nanodet', 'nanodet-plus'] and args.num_classes:
-        log.warning('The "--num_classes" option works only for "-at==nanodet" and "-at==nanodet-plus". Option will be omitted')
+        log.warning(
+            'The "--num_classes" option works only for "-at==nanodet" and '
+            '"-at==nanodet-plus". Option will be omitted'
+        )
 
     if args.adapter == 'openvino':
-        plugin_config = get_user_config(args.device, args.num_streams, args.num_threads)
-        model_adapter = OpenvinoAdapter(create_core(), args.model, device=args.device, plugin_config=plugin_config,
-                                        max_num_requests=args.num_infer_requests, model_parameters={'input_layouts': args.layout})
+        plugin_config = get_user_config(
+            args.device, args.num_streams, args.num_threads
+        )
+        model_adapter = OpenvinoAdapter(
+            create_core(), args.model, device=args.device,
+            plugin_config=plugin_config,
+            max_num_requests=args.num_infer_requests,
+            model_parameters={'input_layouts': args.layout}
+        )
     elif args.adapter == 'ovms':
         model_adapter = OVMSAdapter(args.model)
     else:
@@ -229,7 +249,9 @@ def inference_openvino(args, cap):
         'input_size': args.input_size,  # The CTPN specific
         'num_classes': args.num_classes,  # The NanoDet and NanoDetPlus specific
     }
-    model = DetectionModel.create_model(args.architecture_type, model_adapter, configuration)
+    model = DetectionModel.create_model(
+        args.architecture_type, model_adapter, configuration
+    )
     model.log_layers_info()
 
     detector_pipeline = AsyncPipeline(model)
@@ -240,7 +262,7 @@ def inference_openvino(args, cap):
     palette = ColorPalette(len(model.labels) if model.labels else 100)
     metrics = PerformanceMetrics()
     render_metrics = PerformanceMetrics()
-    presenter = None
+    # presenter = None
     output_transform = None
     video_writer = cv.VideoWriter()
 
@@ -258,13 +280,18 @@ def inference_openvino(args, cap):
             if len(objects) and args.raw_output_message:
                 print_raw_results(objects, model.labels, next_frame_id_to_show)
 
-            presenter.drawGraphs(frame)
+            # presenter.drawGraphs(frame)
             rendering_start_time = perf_counter()
-            frame = draw_detections(frame, objects, palette, model.labels, output_transform)
+            frame = draw_detections(
+                frame, objects, palette, model.labels, output_transform
+            )
             render_metrics.update(rendering_start_time)
             metrics.update(start_time, frame)
 
-            if video_writer.isOpened() and (args.output_limit <= 0 or next_frame_id_to_show <= args.output_limit-1):
+            if (video_writer.isOpened() and (
+                    args.output_limit <= 0 or
+                    next_frame_id_to_show <= args.output_limit - 1
+            )):
                 video_writer.write(frame)
             next_frame_id_to_show += 1
 
@@ -276,7 +303,7 @@ def inference_openvino(args, cap):
                 # Quit.
                 if key in {ord('q'), ord('Q'), ESC_KEY}:
                     break
-                presenter.handleKey(key)
+                # presenter.handleKey(key)
             continue
 
         if detector_pipeline.is_ready():
@@ -288,18 +315,24 @@ def inference_openvino(args, cap):
                     raise ValueError("Can't read an image from the input")
                 break
             if next_frame_id == 0:
-                output_transform = OutputTransform(frame.shape[:2], args.output_resolution)
+                output_transform = OutputTransform(frame.shape[:2],
+                                                   args.output_resolution)
                 if args.output_resolution:
                     output_resolution = output_transform.new_resolution
                 else:
                     output_resolution = (frame.shape[1], frame.shape[0])
-                presenter = monitors.Presenter(args.utilization_monitors, 55,
-                                               (round(output_resolution[0] / 4), round(output_resolution[1] / 8)))
-                if args.output and not video_writer.open(args.output, cv.VideoWriter_fourcc(*'MJPG'),
-                                                         cap.fps(), output_resolution):
+                # presenter = monitors.Presenter(args.utilization_monitors, 55,
+                #                                (round(output_resolution[0] / 4),
+                #                                 round(output_resolution[1] / 8)))
+                if args.output and not video_writer.open(
+                        args.output, cv.VideoWriter_fourcc(*'MJPG'),
+                        cap.fps(), output_resolution
+                ):
                     raise RuntimeError("Can't open video writer")
             # Submit for inference
-            detector_pipeline.submit_data(frame, next_frame_id, {'frame': frame, 'start_time': start_time})
+            detector_pipeline.submit_data(
+                frame, next_frame_id, {'frame': frame, 'start_time': start_time}
+            )
             next_frame_id += 1
         else:
             # Wait for empty request
@@ -320,13 +353,18 @@ def inference_openvino(args, cap):
         if len(objects) and args.raw_output_message:
             print_raw_results(objects, model.labels, next_frame_id_to_show)
 
-        presenter.drawGraphs(frame)
+        # presenter.drawGraphs(frame)
         rendering_start_time = perf_counter()
-        frame = draw_detections(frame, objects, palette, model.labels, output_transform)
+        frame = draw_detections(
+            frame, objects, palette, model.labels, output_transform
+        )
         render_metrics.update(rendering_start_time)
         metrics.update(start_time, frame)
 
-        if video_writer.isOpened() and (args.output_limit <= 0 or next_frame_id_to_show <= args.output_limit-1):
+        if (video_writer.isOpened() and (
+                args.output_limit <= 0 or
+                next_frame_id_to_show <= args.output_limit - 1
+        )):
             video_writer.write(frame)
 
         if not args.no_show:
@@ -337,7 +375,7 @@ def inference_openvino(args, cap):
             # Quit
             if key in {ord('q'), ord('Q'), ESC_KEY}:
                 break
-            presenter.handleKey(key)
+            # presenter.handleKey(key)
     # OpenVINO postprocessing stop
 
     # OpenVINO results begin
@@ -347,8 +385,8 @@ def inference_openvino(args, cap):
                           detector_pipeline.inference_metrics.get_latency(),
                           detector_pipeline.postprocess_metrics.get_latency(),
                           render_metrics.get_latency())
-    for rep in presenter.reportMeans():
-        log.info(rep)
+    # for rep in presenter.reportMeans():
+    #     log.info(rep)
     # OpenVINO results end
 
 
@@ -374,9 +412,46 @@ def main():
     args = build_argparser().parse_args()
     cap = open_images_capture(args.input, args.loop)
 
+    # OpenVINO
     _, args.model = model_openvino
-    inference_openvino(args, cap)
+    if args.output and isinstance(args.output, str):
+        split = list(osp.splitext(args.output))
+        split.insert(1, f'.{OPENVINO_MODEL}')
+        args.output = ''.join(split)
+        log.info(f"Saving to {args.output}...")
+    else:
+        log.warning(f"Malformed output: {args.output}! Setting to 'None'")
+        args.output = None
+    args.architecture_type = 'ssd'
+    args.adapter = 'openvino'
+    # inference_openvino(args, cap)
+
+    cap = cap.cap
+    # cap.cap.set(cv.CAP_PROP_POS_FRAMES, 0)
+
+    # OpenCV
     args.model, args.config = model_opencv
+    if args.output and isinstance(args.output, str):
+        split = list(osp.splitext(args.output))
+        split.insert(1, f'.{OPENCV_MODEL}')
+        args.output = ''.join(split)
+        log.info(f"Saving to {args.output}...")
+    else:
+        log.warning(f"Malformed output: {args.output}! Setting to 'None'")
+        args.output = None
+    config = ConfigParser(strict=False)
+    config.read(args.config)
+    args.backend = 3
+    args.framework = 'darknet'
+    args.nms = 0.15
+    args.alias = None
+    args.mean = [0, 0, 0]
+    args.scale = 1.0
+    args.width = int(config['net']['width'])
+    args.height = int(config['net']['height'])
+    args.rgb = True
+    # args.classes = None
+    args.coi = (1, )  # class 1 - person
     inference_opencv(args, cap)
 
 
