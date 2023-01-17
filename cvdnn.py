@@ -152,7 +152,7 @@ class WrapperDNN:
             with open(self.args.classes, 'rt') as f:
                 self.classes = f.read().rstrip('\n').split('\n')
 
-        self.confThreshold = self.args.thr
+        self.confThreshold = self.args.prob_threshold
         self.nmsThreshold = self.args.nms
 
         self.net = None
@@ -187,11 +187,17 @@ class WrapperDNN:
             self.outHeight = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
             self.out.open(args.output, cv.VideoWriter_fourcc(*'MJPG'),
                           self.fps, (self.outWidth, self.outHeight))
-            print(f"DEBUG: output shape = {(self.outWidth, self.outHeight)}...")
+            # print(f"DEBUG: output shape = {(self.outWidth, self.outHeight)}...")
         else:
             self.out = None
             self.outWidth = None
             self.outHeight = None
+
+        if hasattr(args, 'coi') and isinstance(args.coi, (dict, list, set, tuple)):
+            self.classes_of_interest = np.array(tuple(args.coi), dtype=np.uint)
+            self.classes_of_interest -= 1
+        else:
+            self.classes_of_interest = None
 
     def load_network(self):
         # Load a network
@@ -201,13 +207,14 @@ class WrapperDNN:
         self.net.setPreferableBackend(self.args.backend)
         self.net.setPreferableTarget(self.args.target)
         self.outNames = self.net.getUnconnectedOutLayersNames()
+        # print(f"DEBUG: out names = {self.outNames}")
 
     def drawPred(self, frame, classId, conf, left, top, right, bottom):
-        if not all((0 <= left < self.inpWidth, 0 <= top < self.inpHeight,
-                    0 < right <= self.inpWidth, 0 < bottom <= self.inpHeight)):
-            return None
+        # if not all((0 <= left < self.inpWidth, 0 <= top < self.inpHeight,
+        #             0 < right <= self.inpWidth, 0 < bottom <= self.inpHeight)):
+        #     return None
         # Draw a bounding box
-        print(f"DEBUG: {classId, conf, left, top, right, bottom}")
+        # print(f"DEBUG: {classId, conf, left, top, right, bottom}")
         cv.rectangle(frame, (left, top), (right, bottom), (0, 255, 0))
 
         label = '%.2f' % conf
@@ -226,10 +233,15 @@ class WrapperDNN:
     def postprocess(self, frame, outs):
         frameHeight = frame.shape[0]
         frameWidth = frame.shape[1]
+        # print(f"DEBUG: post-frame dimensions = {frameWidth, frameHeight}")
 
         layerNames = self.net.getLayerNames()
         lastLayerId = self.net.getLayerId(layerNames[-1])
         lastLayer = self.net.getLayer(lastLayerId)
+
+        confThreshold = self.confThreshold
+        nmsThreshold = self.nmsThreshold
+        coi = self.classes_of_interest
 
         classIds = []
         confidences = []
@@ -265,9 +277,12 @@ class WrapperDNN:
             for out in outs:
                 for detection in out:
                     scores = detection[5:]
+                    if coi is not None and (scores[coi] < 1e-9).all():
+                        continue
                     classId = np.argmax(scores)
                     confidence = scores[classId]
-                    if confidence > self.confThreshold:
+                    # TODO: aggregate with coi
+                    if confidence > confThreshold:
                         center_x = int(detection[0] * frameWidth)
                         center_y = int(detection[1] * frameHeight)
                         width = int(detection[2] * frameWidth)
@@ -286,15 +301,20 @@ class WrapperDNN:
         if len(self.outNames) > 1 or lastLayer.type == 'Region' and self.args.backend != cv.dnn.DNN_BACKEND_OPENCV:
             indices = []
             classIds = np.array(classIds)
+            # print(f"DEBUG: ids.shape = {classIds.shape}")
             boxes = np.array(boxes)
+            # print(f"DEBUG: boxes.shape = {boxes.shape}")
             confidences = np.array(confidences)
+            # print(f"DEBUG: confidences.shape = {confidences.shape}")
             unique_classes = set(classIds)
+            # print(f"DEBUG: unique classes = {unique_classes}")
             for cl in unique_classes:
                 class_indices = np.where(classIds == cl)[0]
+                # print(f"DEBUG: class indices = {class_indices}")
                 conf = confidences[class_indices]
                 box = boxes[class_indices].tolist()
-                nms_indices = cv.dnn.NMSBoxes(box, conf, self.confThreshold,
-                                              self.nmsThreshold)
+                nms_indices = cv.dnn.NMSBoxes(box, conf, confThreshold,
+                                              nmsThreshold)
                 # print(f"DEBUG: nms_indices.shape = {nms_indices.shape}")
                 # print(f"DEBUG: nms_indices = {nms_indices}")
                 # nms_indices = nms_indices[:, 0] if len(nms_indices) else []
@@ -309,6 +329,10 @@ class WrapperDNN:
             top = box[1]
             width = box[2]
             height = box[3]
+            if not all((0 <= left < frameWidth, 0 <= top < frameHeight,
+                        0 < left + width <= frameWidth,
+                        0 < top + height <= frameHeight)):
+                continue
             self.drawPred(frame, classIds[i], confidences[i], left, top,
                           left + width, top + height)
 
@@ -345,12 +369,14 @@ class WrapperDNN:
             try:
                 # Request prediction first because they put after frames
                 outs = self.predictionsQueue.get_nowait()
+                # outs = self.predictionsQueue.get()
                 frame = self.processedFramesQueue.get_nowait()
+                # frame = self.processedFramesQueue.get()
 
                 self.postprocess(frame, outs)
 
                 # Put efficiency information
-                if False and self.predictionsQueue.counter > 1:
+                if True and self.predictionsQueue.counter > 1:
                     label = 'Camera: %.2f FPS' % (self.framesQueue.getFPS())
                     cv.putText(frame, label, (0, 15), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0))
 
@@ -392,7 +418,9 @@ class WrapperDNN:
     def framesThreadBody(self):
         while self.process:
             hasFrame, frame = self.cap.read()
+            # frame = self.cap.read()
             if not hasFrame:
+            # if frame is None:
                 break
             self.framesQueue.put(frame)
 
@@ -400,10 +428,11 @@ class WrapperDNN:
     def processingThreadBody(self):
         futureOutputs = []
         while self.process:
-            # Get a next frame
+            # Get next frame
             frame = None
             try:
                 frame = self.framesQueue.get_nowait()
+                # frame = self.framesQueue.get()
 
                 if self.args.asyncN:
                     if len(futureOutputs) == self.args.asyncN:
@@ -420,6 +449,7 @@ class WrapperDNN:
                 # Create a 4D blob from a frame.
                 self.inpWidth = self.args.width if self.args.width else frameWidth
                 self.inpHeight = self.args.height if self.args.height else frameHeight
+                # print(f"DEBUG: args dims = {self.args.width, self.args.height}")
                 frame = cv.resize(frame, (self.inpWidth, self.inpHeight))
                 blob = cv.dnn.blobFromImage(
                     frame, size=(self.inpWidth, self.inpHeight),
@@ -473,7 +503,9 @@ if __name__ == '__main__':
     parser.add_argument('--framework', choices=['caffe', 'torch', 'darknet', 'dldt'],
                         help='Optional name of an origin framework of the model. '
                              'Detect it automatically if it does not set.')
-    parser.add_argument('--thr', type=float, default=0.5, help='Confidence threshold')
+    # parser.add_argument('--thr', type=float, default=0.5, help='Confidence threshold')
+    parser.add_argument('-t', '--prob_threshold', default=0.5, type=float,
+                        help='Optional. Probability threshold for detections filtering.')
     parser.add_argument('--nms', type=float, default=0.4, help='Non-maximum suppression threshold')
     parser.add_argument('--backend', choices=backends, default=cv.dnn.DNN_BACKEND_DEFAULT, type=int,
                         help="Choose one of computation backends: "
